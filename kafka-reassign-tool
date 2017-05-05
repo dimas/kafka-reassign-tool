@@ -1,0 +1,307 @@
+#!/usr/bin/ruby
+
+require 'yaml'
+require 'json'
+require 'open3'
+require 'tempfile'
+require 'optparse'
+
+DEFAULT_KAFKA_ROOT='/opt/kafka'
+DEFAULT_KAFKA_CONFIG='/config/server.properties'
+
+$kafka_root = nil
+$zookeeper_url = nil
+
+def run(command, args = [], opts = {})
+
+    opts = {
+      :raise_on_exitstatus => true,
+      :raise_on_err => true,
+      :input => ''
+    }.merge(opts)
+
+    out = nil
+    err = nil
+    exit_status = nil
+    Open3::popen3(command, *args) do |stdin, stdout, stderr, wait_thr|
+      stdin << opts[:input]
+      stdin.close
+      out = stdout.read
+      err = stderr.read
+      exit_status = wait_thr.value
+    end
+
+    if (opts[:raise_on_exitstatus] && exit_status.exitstatus != 0) || (opts[:raise_on_err] && !err.empty?) then
+      puts "#{command} failed. exitstatus=#{exit_status.exitstatus}, stderr:"
+      puts out
+      raise "#{command} failed"
+    end
+
+    {:out => out, :err => err, :exit_status => exit_status}
+end
+
+def get_kafka_root()
+  return $kafka_root if $kafka_root
+  DEFAULT_KAFKA_ROOT
+end
+
+def get_zk_url()
+  return $zookeeper_url if $zookeeper_url
+
+  config_file = get_kafka_root + DEFAULT_KAFKA_CONFIG
+
+  if File.file? config_file then
+    puts "Reading #{config_file}"
+    File.open(config_file, 'r') do |file|
+      file.each_line do |line|
+        if line =~ /^zookeeper.connect=(.*)/ then
+          $zookeeper_url = $1.strip
+        end
+      end
+    end
+  else
+    puts "Config file #{config_file} does not exist"
+  end
+
+  raise "No zookeeper URL given" unless $zookeeper_url
+
+  $zookeeper_url
+end
+
+def get_brokers()
+    result = run(get_kafka_root + '/bin/zookeeper-shell.sh', [get_zk_url], {:input => 'ls /brokers/ids'})
+
+    # Look for a line
+    #   [1003, 1001, 1002]
+    #
+    brokers = nil
+    result[:out].lines.each {|line|
+      if line =~ /^ \[ ([^\]]+) \] /x then
+        brokers = $1.split(',').collect(&:strip).collect(&:to_i)
+      end
+    }
+
+    brokers
+end
+
+def get_topics()
+    result = run(get_kafka_root + '/bin/kafka-topics.sh', [
+                 '--zookeeper', get_zk_url,
+                 '--list'
+                ])
+    result[:out].lines.collect(&:strip)
+end
+
+def topics_json(topics)
+    # {
+    #  "topics": [
+    #    {"topic": "topicname1"},
+    #    {"topic": "topicname2"}
+    #  ],
+    #  "version":1
+    # }
+
+    data = {
+      :version => 1,
+      :topics => topics.collect{|t| { :topic => t }}
+    }
+
+    data.to_json
+end
+
+def get_current_assignments(topics, brokers)
+
+  topics_file = Tempfile.new(File.basename(__FILE__) + '-topics')
+  topics_file << topics_json(topics)
+  topics_file.close
+
+  result = run(get_kafka_root + '/bin/kafka-reassign-partitions.sh', [
+               '--zookeeper', get_zk_url,
+               '--topics-to-move-json-file', topics_file.path,
+               '--broker-list', brokers.join(','),
+               '--generate'
+              ])
+
+  # Current partition replica assignment
+  #
+  # {"version":1,"partitions":[]}
+  # Proposed partition reassignment configuration
+  #
+  # {"version":1,"partitions":[]}
+
+  unless result[:out] =~ /\ACurrent partition replica assignment(.*)Proposed partition reassignment configuration(.*)\z/m
+    puts "kafka-reassign-partitions.sh output:"
+    puts result[:out]
+    raise "Cannot parse assignment data"
+  end
+
+  JSON.parse($1)
+end
+
+def get_broker_stats(assignments)
+  stats = {}
+
+  assignments['partitions'].each {|item|
+    topic = item['topic']
+    replicas = item['replicas']
+
+    stats[topic] ||= {}
+    topic_stats = stats[topic]
+    replicas.each {|replica|
+      topic_stats[replica] ||= 0
+      topic_stats[replica] += 1
+    }
+  }
+
+  stats
+end
+
+def set_replication(assignments, brokers, replication_factor)
+
+  stats = get_broker_stats(assignments)
+
+  # Make sure we have an entry for each broker even if given topic never uses it
+  stats.each {|topic, topic_data|
+    brokers.each {|broker|
+      topic_data[broker] ||= 0
+    }
+  }
+
+  result = assignments.clone()
+  new_assignments = []
+  result['partitions'] = new_assignments
+
+  assignments['partitions'].each {|item|
+    topic = item['topic']
+    partition = item['partition']
+    replicas = item['replicas']
+
+    topic_stats = stats[topic]
+
+    # Remember what replicas we had before so we can see later if anything has changed
+    orig_replicas = replicas.clone()
+
+    # Ignore replicas that are not in the given list of allowed brokers
+    (replicas - brokers).each {|broker|
+      topic_stats[broker] -= 1
+
+      replicas.delete(broker)
+    }
+
+    while replicas.size > replication_factor do
+      # Remove the most used (for this topic) broker
+      broker = topic_stats.select{|broker, count| replicas.include? broker} .max_by{|broker, count| count}[0]
+      topic_stats[broker] -= 1
+
+      replicas.delete(broker)
+    end
+
+    while replicas.size < replication_factor do
+      # Use least used (for this topic) allowed broker as a new replica
+      broker = topic_stats.select{|broker, count| (brokers - replicas).include? broker} .min_by{|broker, count| count}[0]
+      topic_stats[broker] += 1
+
+      replicas.push broker
+    end
+
+    next if replicas.sort == orig_replicas.sort
+
+    puts "  #{topic}-#{partition} : #{orig_replicas} => #{replicas}"
+
+    item = item.clone()
+    item['replicas'] = replicas
+
+    new_assignments << item
+  }
+
+  result
+end
+
+topics = []
+brokers = []
+replication_factor = nil
+
+optparse = OptionParser.new do |opts|
+  opts.on("--kafka-home <dir>",
+          "Root directory of the Kafka installation",
+          "  (standard Kafka scripts must be under bin/ directory there)",
+          "  Default: #{DEFAULT_KAFKA_ROOT}") { |v| $kafka_root = v }
+  opts.on("--zookeeper <url>",
+          "The connection string for the zookeeper connection",
+          "  If not specified, and attempt to read it from Kafka config file is made") { |v| $zookeeper_url = v }
+  opts.on("--topic <topic1>",
+          "Can be specified multiple times to list one or more topic to apply operation to.",
+          "  If option is not used, operation will apply to all existing topics") { |v| topics << v }
+  opts.on("--brokers <broker1,broker2,...>",
+          "Coma-separated list of brokers that partitions will be reassigned to",
+          "  If option is not used, all brokers of the cluster will be used") { |v| brokers = v.split(',').collect(&:strip).collect(&:to_i) }
+  opts.on("--replication-factor <factor>",
+          "Target replication factor. Required") { |v| replication_factor = v.to_i }
+end
+
+begin
+  optparse.parse!
+  raise OptionParser::MissingArgument.new('replication-factor') if replication_factor.nil?
+rescue OptionParser::InvalidOption, OptionParser::MissingArgument
+  puts $!.to_s
+  puts optparse
+  exit -1
+end
+
+
+zk_url = get_zk_url()
+puts "Using zookeeper URL: #{zk_url}"
+
+puts "Reading list of brokers..."
+known_brokers = get_brokers()
+
+if brokers.empty? then
+  brokers = known_brokers
+else
+  brokers = brokers.sort.uniq
+  invalid = brokers - known_brokers
+  unless invalid.empty?
+    raise "Unknown brokers: #{invalid}"
+  end
+end
+
+puts "Reading list of topics..."
+known_topics = get_topics()
+
+if topics.empty? then
+  topics = known_topics
+else
+  topics = topics.sort.uniq
+  invalid = topics - known_topics
+  unless invalid.empty?
+    raise "Unknown topics: #{invalid}"
+  end
+end
+
+puts "------------------------"
+puts "Brokers:"
+brokers.each {|broker| puts "  #{broker}" }
+puts "Topics:"
+topics.each {|topic| puts "  #{topic}" }
+puts "------------------------"
+
+if brokers.size < replication_factor then
+  raise "Cannot achieve replication factor of #{replication_factor} with #{brokers.size} broker(s)"
+end
+
+puts "Getting current assignments..."
+assignments = get_current_assignments(topics, brokers)
+
+puts "Building new assignments..."
+new_assignments = set_replication(assignments, brokers, replication_factor)
+
+if new_assignments['partitions'].empty? then
+  puts "No changes needed"
+else
+  puts "Saving new assignments into new-assignments.json..."
+  File.open('new-assignments.json', 'w') { |file|
+    file.write(new_assignments.to_json)
+  }
+  puts "Done"
+end
+
