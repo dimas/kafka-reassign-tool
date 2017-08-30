@@ -138,6 +138,18 @@ def get_current_assignments(topics, brokers)
   JSON.parse($1)
 end
 
+# Returns a hash
+#  {
+#    'topic_name' => {
+#      'broker_id' => {
+#        :replica => 0,  // for how many partitions this broker has a replica
+#        :leader => 0,   // for how many partitions this broker is the leader
+#      },
+#      ...
+#    },
+#    ...
+#  }
+#
 def get_broker_stats(assignments)
   stats = {}
 
@@ -147,10 +159,16 @@ def get_broker_stats(assignments)
 
     stats[topic] ||= {}
     topic_stats = stats[topic]
+
+    leader = nil
     replicas.each {|replica|
-      topic_stats[replica] ||= 0
-      topic_stats[replica] += 1
+      leader = replica if leader.nil?
+
+      topic_stats[replica] ||= {:replica => 0, :leader => 0}
+      topic_stats[replica][:replica] += 1
     }
+
+    topic_stats[leader][:leader] += 1 if leader
   }
 
   stats
@@ -163,7 +181,7 @@ def set_replication(assignments, brokers, replication_factor)
   # Make sure we have an entry for each broker even if given topic never uses it
   stats.each {|topic, topic_data|
     brokers.each {|broker|
-      topic_data[broker] ||= 0
+      topic_data[broker] ||= {:replica => 0, :leader => 0}
     }
   }
 
@@ -178,19 +196,27 @@ def set_replication(assignments, brokers, replication_factor)
 
     topic_stats = stats[topic]
 
+    # Calculate for how many partitions a broker should be a leader
+    # I calculate number of partition as a sum of how many partitions each broker leads
+    # this kinda sucks, it would be easier if get_broker_stats returned that info but
+    # that will require changing its result structure once again. So next time.
+    partition_count = topic_stats.values.collect {|data| data[:leader]}.reduce(0, :+)
+    leader_target = partition_count / brokers.size
+
     # Remember what replicas we had before so we can see later if anything has changed
     orig_replicas = replicas.clone()
 
     # Ignore replicas that are not in the given list of allowed brokers
     (replicas - brokers).each {|broker|
-      topic_stats[broker] -= 1
+      topic_stats[broker][:replica] -= 1
+      topic_stats[broker][:leader] -= 1
 
       replicas.delete(broker)
     }
 
     while replicas.size > replication_factor do
       # Remove the most used (for this topic) broker
-      broker = topic_stats.select{|broker, count| replicas.include? broker} .max_by{|broker, count| count}[0]
+      broker = topic_stats.select{|broker, data| replicas.include? broker} .max_by{|broker, data| data[:replica]}[0]
       topic_stats[broker] -= 1
 
       replicas.delete(broker)
@@ -198,13 +224,24 @@ def set_replication(assignments, brokers, replication_factor)
 
     while replicas.size < replication_factor do
       # Use least used (for this topic) allowed broker as a new replica
-      broker = topic_stats.select{|broker, count| (brokers - replicas).include? broker} .min_by{|broker, count| count}[0]
-      topic_stats[broker] += 1
+      broker = topic_stats.select{|broker, data| (brokers - replicas).include? broker} .min_by{|broker, data| data[:replica]}[0]
+      topic_stats[broker][:replica] += 1
 
-      replicas.push broker
+      if topic_stats[broker][:leader] < leader_target || replicas.empty? then
+        # Make the new broker a leader
+        old_leader = replicas.shift
+        topic_stats[old_leader][:leader] -= 1 unless old_leader.nil?
+        topic_stats[broker][:leader] += 1
+        replicas.unshift broker
+        replicas.push old_leader
+      else
+        # Make a new broker ordinary replica
+        replicas.push broker
+      end
+
     end
 
-    next if replicas.sort == orig_replicas.sort
+    next if replicas == orig_replicas
 
     puts "  #{topic}-#{partition} : #{orig_replicas} => #{replicas}"
 
@@ -290,7 +327,7 @@ if brokers.size < replication_factor then
 end
 
 puts "Getting current assignments..."
-assignments = get_current_assignments(topics, brokers)
+assignments = get_current_assignments(topics, known_brokers)
 
 puts "Building new assignments..."
 new_assignments = set_replication(assignments, brokers, replication_factor)
