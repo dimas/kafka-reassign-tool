@@ -33,7 +33,7 @@ def run(command, args = [], opts = {})
 
     if (opts[:raise_on_exitstatus] && exit_status.exitstatus != 0) || (opts[:raise_on_err] && !err.empty?) then
       puts "#{command} failed. exitstatus=#{exit_status.exitstatus}, stderr:"
-      puts out
+      puts err
       raise "#{command} failed"
     end
 
