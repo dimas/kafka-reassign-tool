@@ -10,11 +10,14 @@ What it can do:
 * increase replication for existing topics
 * decrease replication factor for existing topics
 * remove all replicas from a particular broker so it can be decomissioned
+* balance leaders
 
-In all these cases kafka-reassign-tool will try to make as little changes as possible to the assignments which makes it very
+In all these cases kafka-reassign-tool will try to miminise number of changes which makes it 
 different from standard Kafka tools which may generate a better distribution but they may generate a lot of movement
 by reallocating each partition to a completely different set of brokers (which may be ok for small installation but
 become an issue when you have lots of partitions and brokers).
+
+Note: I wrote this tool before discovering Linkedin's [kafka-tools](https://github.com/linkedin/kafka-tools) for example. I am still using my tool now but you may have a better shot with these more mature ones.
 
 ## Configuration
 `kafka-reassign-tool` needs to know where Kafka standard scripts are located as well as Zookeeper URL.
@@ -28,7 +31,7 @@ Running the tool with `--replication-factor 3` for example will change partition
 `kafka-reassign-tool` goes over all partitions one by one and:
 * if partition has fewer replicas than needed - adds more replicas by selecting least used brokers (that have fewer replicas for the topic than others)
 * if partition has more replicas than needed - removes extra replicas by removing most used brokers (that have more replicas for the topic than others)
-* if partition already at target replication factor, nothing is changed for it
+* if partition already at target replication factor, the tool still may re-order its replicas to make sure leader distribution is more level among brokers
 
 This is an example output of the tool when it is asked to increase replication factor for a topic with 2 replicas to 3:
 ```
