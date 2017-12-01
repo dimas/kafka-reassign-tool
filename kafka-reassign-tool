@@ -189,6 +189,11 @@ def set_replication(assignments, brokers, replication_factor)
   new_assignments = []
   result['partitions'] = new_assignments
 
+  puts
+  puts "Initial stats:"
+  puts stats
+  puts
+
   assignments['partitions'].each {|item|
     topic = item['topic']
     partition = item['partition']
@@ -206,13 +211,19 @@ def set_replication(assignments, brokers, replication_factor)
     # Remember what replicas we had before so we can see later if anything has changed
     orig_replicas = replicas.clone()
 
-    # Ignore replicas that are not in the given list of allowed brokers
+    # Remove replicas that are not in the given list of allowed brokers
+    old_leader = replicas[0]
     (replicas - brokers).each {|broker|
       topic_stats[broker][:replica] -= 1
-      topic_stats[broker][:leader] -= 1
-
       replicas.delete(broker)
     }
+    # If removing not allowed brokers changed leader, update stats too
+    new_leader = replicas[0]
+    if new_leader != old_leader then
+      topic_stats[old_leader][:leader] -= 1 unless old_leader.nil?
+      topic_stats[new_leader][:leader] += 1 unless new_leader.nil?
+    end
+
 
     while replicas.size > replication_factor do
       # Remove the most used (for this topic) broker
@@ -227,18 +238,35 @@ def set_replication(assignments, brokers, replication_factor)
       broker = topic_stats.select{|broker, data| (brokers - replicas).include? broker} .min_by{|broker, data| data[:replica]}[0]
       topic_stats[broker][:replica] += 1
 
-      if topic_stats[broker][:leader] < leader_target || replicas.empty? then
-        # Make the new broker a leader
-        old_leader = replicas.shift
-        topic_stats[old_leader][:leader] -= 1 unless old_leader.nil?
-        topic_stats[broker][:leader] += 1
-        replicas.unshift broker
-        replicas.push old_leader
-      else
-        # Make a new broker ordinary replica
-        replicas.push broker
-      end
+      # Make a new broker ordinary replica, the code below will promote it to leader if needed
+      replicas.push broker
+    end
 
+    # Select the best leader for this partition (based on which broker is a leader for fewest partitions)
+
+    candidate_leader_pos = nil
+    candidate_leader_leads = leader_target
+
+    replicas.each_with_index{|broker, pos|
+      # For how many partitions this broker is currently the leader
+      leader_for = topic_stats[broker][:leader]
+      if leader_for < candidate_leader_leads then
+        candidate_leader_pos = pos
+        candidate_leader_leads = leader_for
+      end
+    }
+
+    # If the best leader is not our first item, make it the first
+    if candidate_leader_pos && candidate_leader_pos > 0 then
+      old_leader = replicas[0]
+      new_leader = replicas[candidate_leader_pos]
+      # Only swap if it actually makes sense, do not move things with the same weight around
+      if topic_stats[old_leader][:leader] > topic_stats[new_leader][:leader] then
+        topic_stats[old_leader][:leader] -= 1
+        topic_stats[new_leader][:leader] += 1
+        replicas.delete_at(candidate_leader_pos)
+        replicas.unshift(new_leader)
+      end
     end
 
     next if replicas == orig_replicas
@@ -250,6 +278,11 @@ def set_replication(assignments, brokers, replication_factor)
 
     new_assignments << item
   }
+
+  puts
+  puts "Final stats:"
+  puts stats
+  puts
 
   result
 end
@@ -341,6 +374,7 @@ else
   }
   puts "Done"
   puts "To apply, run:"
-  puts " #{get_kafka_root + '/bin/kafka-reassign-partitions.sh'} --zookeeper #{zk_url} --reassignment-json-file new-assignments.json --execute"
+  puts "  #{get_kafka_root + '/bin/kafka-reassign-partitions.sh'} --zookeeper #{zk_url} --reassignment-json-file new-assignments.json --execute"
+  puts
 end
 
