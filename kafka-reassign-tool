@@ -240,6 +240,8 @@ def set_replication(assignments, brokers, replication_factor)
 
       # Make a new broker ordinary replica, the code below will promote it to leader if needed
       replicas.push broker
+      # However if it is the only broker, that makes it a leader
+      topic_stats[broker][:leader] += 1
     end
 
     # Select the best leader for this partition (based on which broker is a leader for fewest partitions)
