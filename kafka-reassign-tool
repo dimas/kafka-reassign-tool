@@ -238,10 +238,10 @@ def set_replication(assignments, brokers, replication_factor)
       broker = topic_stats.select{|broker, data| (brokers - replicas).include? broker} .min_by{|broker, data| data[:replica]}[0]
       topic_stats[broker][:replica] += 1
 
-      # Make a new broker ordinary replica, the code below will promote it to leader if needed
+      # Make a new broker ordinary replica, the code below will promote it to leader if needed.
+      # However if it is the only broker, count it as a leader
+      topic_stats[broker][:leader] += 1 if replicas.empty?
       replicas.push broker
-      # However if it is the only broker, that makes it a leader
-      topic_stats[broker][:leader] += 1
     end
 
     # Select the best leader for this partition (based on which broker is a leader for fewest partitions)
