@@ -214,35 +214,36 @@ def set_replication(assignments, brokers, replication_factor)
     # Remove replicas that are not in the given list of allowed brokers
     old_leader = replicas[0]
     (replicas - brokers).each {|broker|
-      topic_stats[broker][:replica] -= 1
       replicas.delete(broker)
+      topic_stats[broker][:replica] -= 1
     }
-    # If removing not allowed brokers changed leader, update stats too
-    new_leader = replicas[0]
-    if new_leader != old_leader then
-      topic_stats[old_leader][:leader] -= 1 unless old_leader.nil?
-      topic_stats[new_leader][:leader] += 1 unless new_leader.nil?
-    end
-
 
     while replicas.size > replication_factor do
       # Remove the most used (for this topic) broker
       broker = topic_stats.select{|broker, data| replicas.include? broker} .max_by{|broker, data| data[:replica]}[0]
-      topic_stats[broker] -= 1
 
+      topic_stats[broker][:replica] -= 1
       replicas.delete(broker)
     end
 
     while replicas.size < replication_factor do
       # Use least used (for this topic) allowed broker as a new replica
       broker = topic_stats.select{|broker, data| (brokers - replicas).include? broker} .min_by{|broker, data| data[:replica]}[0]
-      topic_stats[broker][:replica] += 1
 
-      # Make a new broker ordinary replica, the code below will promote it to leader if needed.
-      # However if it is the only broker, count it as a leader
-      topic_stats[broker][:leader] += 1 if replicas.empty?
+      # Make a new broker ordinary replica, the code below will promote it to leader if needed
       replicas.push broker
+      topic_stats[broker][:replica] += 1
     end
+
+    # If removing brokers that were not allowed or adding/removing replicas changed the leader, update stats too
+    # Need to have up-to-date stats before using them to select a new leader
+    new_leader = replicas[0]
+    if new_leader != old_leader then
+      topic_stats[old_leader][:leader] -= 1 unless old_leader.nil?
+      topic_stats[new_leader][:leader] += 1 unless new_leader.nil?
+    end
+
+    old_leader = new_leader
 
     # Select the best leader for this partition (based on which broker is a leader for fewest partitions)
 
@@ -258,17 +259,14 @@ def set_replication(assignments, brokers, replication_factor)
       end
     }
 
-    # If the best leader is not our first item, make it the first
-    if candidate_leader_pos && candidate_leader_pos > 0 then
-      old_leader = replicas[0]
-      new_leader = replicas[candidate_leader_pos]
-      # Only swap if it actually makes sense, do not move things with the same weight around
-      if topic_stats[old_leader][:leader] > topic_stats[new_leader][:leader] then
-        topic_stats[old_leader][:leader] -= 1
-        topic_stats[new_leader][:leader] += 1
-        replicas.delete_at(candidate_leader_pos)
-        replicas.unshift(new_leader)
-      end
+    # Make our leader the first element in the list
+    replicas.unshift(replicas.delete_at(candidate_leader_pos)) if candidate_leader_pos
+
+    # Update leader stats again if leader has changed
+    new_leader = replicas[0]
+    if new_leader != old_leader then
+      topic_stats[old_leader][:leader] -= 1 unless old_leader.nil?
+      topic_stats[new_leader][:leader] += 1 unless new_leader.nil?
     end
 
     next if replicas == orig_replicas
