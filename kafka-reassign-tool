@@ -374,7 +374,9 @@ else
   }
   puts "Done"
   puts "To apply, run:"
-  puts "  #{get_kafka_root + '/bin/kafka-reassign-partitions.sh'} --zookeeper #{zk_url} --reassignment-json-file new-assignments.json --execute"
+  puts "  #{get_kafka_root + '/bin/kafka-reassign-partitions.sh'} --zookeeper #{zk_url} --reassignment-json-file new-assignments.json --execute --throttle XXXXXXXX"
+  puts "Then verify with:"
+  puts "  #{get_kafka_root + '/bin/kafka-reassign-partitions.sh'} --zookeeper #{zk_url} --reassignment-json-file new-assignments.json --verify"
   puts
 end
 
