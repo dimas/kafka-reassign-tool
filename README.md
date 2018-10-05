@@ -137,6 +137,11 @@ However, keep in mind that the same value from `--replication-factor` will be us
 ## Applying the change
 After successful invocation, `kafka-reassign-tool` generates `new-assignments.json` file which can be then applied as
 ```
-kafka-reassign-partitions.sh --zookeeper <url> --reassignment-json-file new-assignments.json --execute
+kafka-reassign-partitions.sh --zookeeper <url> --reassignment-json-file new-assignments.json --execute --throttle 100000000
 ```
-
+the example above throttles replication to 100Mb/sec. You may decide to use a different limit or to omit it completely.
+If throttling was used, at the end you must verify reassignmnet with
+```
+kafka-reassign-partitions.sh --zookeeper <url> --reassignment-json-file new-assignments.json --verify
+```
+so replication quota is reset. For more details see https://kafka.apache.org/documentation.html#rep-throttle
