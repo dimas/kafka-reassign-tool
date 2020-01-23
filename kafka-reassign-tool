@@ -276,6 +276,9 @@ def set_replication(assignments, brokers, replication_factor)
     item = item.clone()
     item['replicas'] = replicas
 
+    # Create just enough log_dirs configuration
+    item['log_dirs'] = item['replicas'].count.times.map { |x| "any" }
+
     new_assignments << item
   }
 
