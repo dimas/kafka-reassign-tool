@@ -276,6 +276,9 @@ def set_replication(assignments, brokers, replication_factor)
     item = item.clone()
     item['replicas'] = replicas
 
+    item['log_dirs'].clear
+    item['log_dirs'] = ["any"] * replicas.size
+
     new_assignments << item
   }
 
