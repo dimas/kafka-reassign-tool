@@ -276,6 +276,13 @@ def set_replication(assignments, brokers, replication_factor)
     item = item.clone()
     item['replicas'] = replicas
 
+    # If log_dirs configuration is present (it is optional) and it only
+    # contains 'any' and not something else, replace it with a new one
+    # as number of replicas may have changed.
+    if item['log_dirs'] == ['any'] * orig_replicas.count
+      item['log_dirs'] = ['any'] * replicas.count
+    end
+        
     new_assignments << item
   }
 
