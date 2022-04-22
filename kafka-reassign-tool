@@ -129,7 +129,10 @@ def get_current_assignments(topics, brokers)
   #
   # {"version":1,"partitions":[]}
 
-  unless result[:out] =~ /\ACurrent partition replica assignment(.*)Proposed partition reassignment configuration(.*)\z/m
+  # Note that on newer Kafka versions all that is prepended by this line:
+  # Warning: --zookeeper is deprecated, and will be removed in a future version of Kafka.
+
+  unless result[:out] =~ /Current partition replica assignment(.*)Proposed partition reassignment configuration(.*)\z/m
     puts "kafka-reassign-partitions.sh output:"
     puts result[:out]
     raise "Cannot parse assignment data"
